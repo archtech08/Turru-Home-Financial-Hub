@@ -121,6 +121,8 @@
   .empty-state .small { font-size: 11px; max-width: 360px; }
 
   .banner { background: rgba(255,34,85,0.08); border: 1px solid rgba(255,34,85,0.3); color: #ff8fa8; border-radius: 8px; padding: 12px 16px; font-size: 12px; margin-bottom: 16px; line-height: 1.5; }
+  .banner.warn { background: rgba(255,170,0,0.08); border-color: rgba(255,170,0,0.3); color: #ffcf8f; }
+  .banner .row-item { color: #ffe0b3; }
   .banner code { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; }
 
   ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -148,6 +150,7 @@
 
 <div class="body">
   <div id="errorBanner"></div>
+  <div id="warningBanner"></div>
 
   <div class="filter-row" id="personFilters"></div>
 
@@ -256,9 +259,36 @@ function parseDateToISO(raw) {
 }
 function monthLabel(ym) {
   if (ym === "all") return "All Months";
+  if (ym === "last3") return "Last 3 Months";
+  if (ym === "ytd") return "Year to Date";
   const [y, m] = ym.split("-");
   const names = ["January","February","March","April","May","June","July","August","September","October","November","December"];
   return `${names[parseInt(m,10)-1]} ${y}`;
+}
+// For "last3" / "ytd", compute an actual [start,end] date range based on the
+// most recent transaction date present (so it still makes sense with sample data).
+function computeQuickRange(period, txs) {
+  if (!txs.length) return null;
+  const maxDate = txs.map(t => t.date).sort().slice(-1)[0];
+  if (period === "ytd") {
+    return { start: maxDate.slice(0,4) + "-01-01", end: maxDate };
+  }
+  if (period === "last3") {
+    let [y, m] = maxDate.slice(0,7).split("-").map(Number);
+    m -= 2;
+    while (m <= 0) { m += 12; y -= 1; }
+    return { start: `${y}-${String(m).padStart(2,"0")}-01`, end: maxDate };
+  }
+  return null;
+}
+function inSelectedPeriod(t, txs) {
+  if (state.month === "all") return true;
+  if (state.month === "last3" || state.month === "ytd") {
+    const range = computeQuickRange(state.month, txs);
+    if (!range) return true;
+    return t.date >= range.start && t.date <= range.end;
+  }
+  return t.date.startsWith(state.month);
 }
 
 async function fetchCsvRaw(url) {
@@ -317,17 +347,31 @@ async function loadData(isManualRefresh) {
     const expText = await fetchCsvRaw(CSV_URL);
     const expRows = parseCsvFlexibleHeader(expText, ["date", "category", "amount"]);
     const txs = [];
+    const skipped = [];
     let id = 1;
     for (const norm of expRows) {
-      const date = parseDateToISO(norm.date);
-      const amount = parseAmount(norm.amount);
+      const rawDate = (norm.date || "").toString().trim();
+      const rawAmount = (norm.amount || "").toString().trim();
       const category = (norm.category || "").toString().trim();
       const person = (norm.person || "").toString().trim() || "Unassigned";
       const desc = (norm.description || norm.desc || "").toString().trim();
-      if (!date || isNaN(amount) || !category) continue;
+      const hasAnyContent = rawDate || rawAmount || category || desc;
+      if (!hasAnyContent) continue; // fully blank row — ignore silently
+
+      const date = parseDateToISO(rawDate);
+      const amount = parseAmount(rawAmount);
+      const missing = [];
+      if (!date) missing.push("date");
+      if (isNaN(amount)) missing.push("amount");
+      if (!category) missing.push("category");
+      if (missing.length) {
+        skipped.push({ date: rawDate || "?", desc: desc || "(no description)", missing });
+        continue;
+      }
       txs.push({ id: id++, date, desc, category, amount, person });
     }
     state.txs = txs;
+    state.skippedRows = skipped;
 
     // Budget (optional — dashboard still works without it)
     if (budgetConfigured) {
@@ -370,7 +414,7 @@ function finishLoad(btn, isManualRefresh) {
 
 function getFiltered() {
   return state.txs.filter(t => {
-    if (state.month !== "all" && !t.date.startsWith(state.month)) return false;
+    if (!inSelectedPeriod(t, state.txs)) return false;
     if (state.personFilter !== "all" && t.person !== state.personFilter) return false;
     if (state.excludedCats.includes(t.category)) return false;
     return true;
@@ -401,6 +445,18 @@ function render() {
     ? `<div class="banner">${state.error}${(!CSV_URL || CSV_URL.indexOf("PASTE_YOUR")===0) ? "" : " The dashboard will keep retrying automatically."}</div>`
     : "";
 
+  const warnBanner = document.getElementById("warningBanner");
+  const skipped = state.skippedRows || [];
+  if (skipped.length) {
+    const items = skipped.slice(0, 5).map(r =>
+      `<div class="row-item">• ${r.date} — ${r.desc} <em>(missing ${r.missing.join(", ")})</em></div>`
+    ).join("");
+    const more = skipped.length > 5 ? `<div class="row-item">+ ${skipped.length - 5} more</div>` : "";
+    warnBanner.innerHTML = `<div class="banner warn">⚠ ${skipped.length} row${skipped.length > 1 ? "s" : ""} in your Expenses sheet ${skipped.length > 1 ? "are" : "is"} missing required info and won't show up until fixed:${items}${more}</div>`;
+  } else {
+    warnBanner.innerHTML = "";
+  }
+
   const allCategories = [...new Set(state.txs.map(t => t.category))].sort();
   const people = [...new Set(state.txs.map(t => t.person))].sort();
   const months = [...new Set(state.txs.map(t => t.date.slice(0,7)))].sort().reverse();
@@ -418,7 +474,7 @@ function render() {
     : (state.loaded ? "No transactions yet — add rows to your Google Sheet to get started" : "Loading…");
 
   const ms = document.getElementById("monthSelect");
-  const monthOptions = ["all", ...months];
+  const monthOptions = ["all", "last3", "ytd", ...months];
   ms.innerHTML = monthOptions.map(m => `<option value="${m}"${m===state.month?" selected":""}>${monthLabel(m)}</option>`).join("");
 
   document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === state.view));
@@ -461,7 +517,7 @@ function render() {
 
   const pcEl = document.getElementById("personCards");
   if (state.personFilter === "all" && state.view !== "budget" && people.length) {
-    const allTxs = state.txs.filter(t => state.month === "all" || t.date.startsWith(state.month));
+    const allTxs = state.txs.filter(t => inSelectedPeriod(t, state.txs));
     pcEl.style.display = "grid";
     pcEl.innerHTML = people.map(p => {
       let inc=0, exp=0;

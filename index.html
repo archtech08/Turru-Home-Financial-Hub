@@ -21,6 +21,7 @@
     --green:    #00ffaa;
     --red:      #ff2255;
     --blue:     #6888bb;
+    --limit-grey: #7d8290;
   }
   body { background: var(--bg); color: var(--text); font-family: "Inter", system-ui, sans-serif; font-size: 13px; min-height: 100vh; }
   select, input, button { font-family: inherit; }
@@ -114,6 +115,7 @@
   .budget-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
   .budget-footer { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); }
   .budget-over-text { color: var(--red); }
+  .budget-limit-text { color: var(--limit-grey); }
   .budget-note { font-size: 10px; color: var(--muted); margin-top: 14px; opacity: 0.7; }
 
   .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 260px; color: var(--muted); text-align: center; gap: 8px; }
@@ -687,26 +689,29 @@ function renderBudget(expCats) {
     return;
   }
 
-  // Compute status for each category, then sort green → yellow → red → no budget set.
+  // Compute status for each category, then sort green → yellow → grey (tapped out) → red → no budget set.
   // Ties within a group keep the original spend-descending order.
+  const BUDGET_EPSILON = 0.005; // half a cent, to treat "spent == budget" as exact despite float rounding
   const withStatus = expCats.map(c => {
     const bud = getBudgetFor(c.name);
     const pct = bud > 0 ? Math.min((c.value/bud)*100, 100) : 0;
-    const over = bud > 0 && c.value > bud;
-    const warn = bud > 0 && !over && pct >= 80;
-    const rank = bud <= 0 ? 3 : (over ? 2 : (warn ? 1 : 0)); // 0=green,1=yellow,2=red,3=no budget
-    return { ...c, bud, pct, over, warn, rank };
+    const over = bud > 0 && c.value > bud + BUDGET_EPSILON;
+    const atLimit = bud > 0 && !over && c.value >= bud - BUDGET_EPSILON; // spent it all, $0 left, not yet over
+    const warn = bud > 0 && !over && !atLimit && pct >= 80;
+    const rank = bud <= 0 ? 4 : (over ? 3 : (atLimit ? 2 : (warn ? 1 : 0))); // 0=green,1=yellow,2=grey,3=red,4=no budget
+    return { ...c, bud, pct, over, atLimit, warn, rank };
   });
   withStatus.sort((a, b) => a.rank - b.rank);
 
   const cards = withStatus.map(c => {
-    const { bud, pct, over, warn } = c;
-    const barColor = over ? "var(--red)" : warn ? "#ffaa00" : "var(--green)";
-    const remaining = bud - c.value;
+    const { bud, pct, over, atLimit, warn } = c;
+    const barColor = over ? "var(--red)" : atLimit ? "var(--limit-grey)" : warn ? "#ffaa00" : "var(--green)";
+    const remaining = Math.max(0, bud - c.value);
     return `<div class="budget-card${over?" over":""}">
       <div class="budget-header">
         <span class="budget-name">${c.name}</span>
-        <div class="budget-amounts">          <span class="budget-spent">${fmt(c.value)}</span>
+        <div class="budget-amounts">
+          <span class="budget-spent">${fmt(c.value)}</span>
           <span class="budget-sep">/</span>
           <span class="budget-limit${bud>0?" set":""}" title="Set in the Budget tab of your Google Sheet">${bud>0?fmt(bud):"no budget set"}</span>
         </div>
@@ -714,7 +719,7 @@ function renderBudget(expCats) {
       <div class="budget-bar-bg"><div class="budget-bar-fill" style="width:${bud>0?pct.toFixed(1):0}%;background:${barColor}"></div></div>
       <div class="budget-footer">
         <span>${bud>0?Math.round(pct)+"% used":"no budget set"}</span>
-        ${bud>0?`<span class="${over?"budget-over-text":""}">${over?fmt(Math.abs(remaining))+" over":fmt(remaining)+" left"}</span>`:""}
+        ${bud>0?`<span class="${over?"budget-over-text":(atLimit?"budget-limit-text":"")}">${over?fmt(Math.abs(bud - c.value))+" over":(atLimit?"$0.00 left":fmt(remaining)+" left")}</span>`:""}
       </div>
     </div>`;
   }).join("");

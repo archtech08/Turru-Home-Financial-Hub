@@ -687,18 +687,26 @@ function renderBudget(expCats) {
     return;
   }
 
-  const cards = expCats.map(c => {
+  // Compute status for each category, then sort green → yellow → red → no budget set.
+  // Ties within a group keep the original spend-descending order.
+  const withStatus = expCats.map(c => {
     const bud = getBudgetFor(c.name);
     const pct = bud > 0 ? Math.min((c.value/bud)*100, 100) : 0;
     const over = bud > 0 && c.value > bud;
     const warn = bud > 0 && !over && pct >= 80;
+    const rank = bud <= 0 ? 3 : (over ? 2 : (warn ? 1 : 0)); // 0=green,1=yellow,2=red,3=no budget
+    return { ...c, bud, pct, over, warn, rank };
+  });
+  withStatus.sort((a, b) => a.rank - b.rank);
+
+  const cards = withStatus.map(c => {
+    const { bud, pct, over, warn } = c;
     const barColor = over ? "var(--red)" : warn ? "#ffaa00" : "var(--green)";
     const remaining = bud - c.value;
     return `<div class="budget-card${over?" over":""}">
       <div class="budget-header">
         <span class="budget-name">${c.name}</span>
-        <div class="budget-amounts">
-          <span class="budget-spent">${fmt(c.value)}</span>
+        <div class="budget-amounts">          <span class="budget-spent">${fmt(c.value)}</span>
           <span class="budget-sep">/</span>
           <span class="budget-limit${bud>0?" set":""}" title="Set in the Budget tab of your Google Sheet">${bud>0?fmt(bud):"no budget set"}</span>
         </div>

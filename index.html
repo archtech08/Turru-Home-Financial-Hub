@@ -377,16 +377,26 @@ async function loadData(isManualRefresh) {
     if (budgetConfigured) {
       const budText = await fetchCsvRaw(BUDGET_CSV_URL);
       const budRows = parseCsvFlexibleHeader(budText, ["category", "budget"]);
-      const budget = {};
+      const hasPersonCol = budRows.some(r => Object.prototype.hasOwnProperty.call(r, "person"));
+      const budgetByPerson = {}; // { category: { person: amount } }
+      const budgetFlat = {};     // { category: amount }  — used if no Person column yet
       for (const norm of budRows) {
         const amtKey = Object.keys(norm).find(k => k.includes("budget"));
         const cat = (norm.category || "").toString().trim();
         const amt = amtKey ? parseAmount(norm[amtKey]) : NaN;
         if (!cat || isNaN(amt)) continue;
         if (/^total\b/i.test(cat)) continue; // skip summary rows like "Total Monthly Budget"
-        budget[cat] = amt;
+        if (hasPersonCol) {
+          const person = (norm.person || "").toString().trim() || "Family";
+          if (!budgetByPerson[cat]) budgetByPerson[cat] = {};
+          budgetByPerson[cat][person] = (budgetByPerson[cat][person] || 0) + amt;
+        } else {
+          budgetFlat[cat] = amt;
+        }
       }
-      state.budget = budget;
+      state.budgetByPerson = budgetByPerson;
+      state.budgetFlat = budgetFlat;
+      state.budgetHasPersonColumn = hasPersonCol;
       state.budgetError = null;
     } else {
       state.budgetError = "Budget tab not connected — paste your published Budget CSV link into BUDGET_CSV_URL to see shared budgets here.";
@@ -432,6 +442,20 @@ function getExpCats(byCat) {
 function getIncCats(byCat) {
   return Object.entries(byCat).filter(([,v]) => v > 0)
     .map(([cat, v]) => ({name: cat, value: v})).sort((a,b) => b.value - a.value);
+}
+// Resolves the budget target for a category, respecting the current person filter.
+// If the Budget tab has a Person column: "all" sums every person's line for that
+// category; a specific person only sees their own line (or 0 if unset).
+// If there's no Person column yet, falls back to one shared number for everyone.
+function getBudgetFor(category) {
+  if (!state.budgetHasPersonColumn) {
+    return (state.budgetFlat && state.budgetFlat[category]) || 0;
+  }
+  const perPerson = (state.budgetByPerson && state.budgetByPerson[category]) || {};
+  if (state.personFilter === "all") {
+    return Object.values(perPerson).reduce((s, v) => s + v, 0);
+  }
+  return perPerson[state.personFilter] || 0;
 }
 
 // ── Charts registry ──
@@ -503,10 +527,10 @@ function render() {
       {label:"Net Balance", value:fmt(net), color: net>=0?"var(--green)":"var(--red)", sub: net>=0?"Surplus":"Deficit"},
     ].map(c => `<div class="card"><div class="card-label">${c.label}</div><div class="card-value" style="color:${c.color}">${c.value}</div><div class="card-sub">${c.sub}</div></div>`).join("");
   } else {
-    const totalAllotted = expCats.reduce((s,c) => s+(state.budget[c.name]||0), 0);
+    const totalAllotted = expCats.reduce((s,c) => s+getBudgetFor(c.name), 0);
     const totalSpent = expCats.reduce((s,c) => s+c.value, 0);
     const remaining = totalAllotted - totalSpent;
-    const catsSet = expCats.filter(c => (state.budget[c.name]||0) > 0).length;
+    const catsSet = expCats.filter(c => getBudgetFor(c.name) > 0).length;
     cardsHtml = [
       {label:"Total Allotted", value:fmt(totalAllotted), color:"var(--blue)", sub: catsSet + " of " + expCats.length + " categories budgeted"},
       {label:"Total Spent", value:fmt(totalSpent), color:"var(--text)", sub: "across " + expCats.length + " categories"},
@@ -664,7 +688,7 @@ function renderBudget(expCats) {
   }
 
   const cards = expCats.map(c => {
-    const bud = state.budget[c.name] || 0;
+    const bud = getBudgetFor(c.name);
     const pct = bud > 0 ? Math.min((c.value/bud)*100, 100) : 0;
     const over = bud > 0 && c.value > bud;
     const warn = bud > 0 && !over && pct >= 80;
@@ -687,12 +711,18 @@ function renderBudget(expCats) {
     </div>`;
   }).join("");
 
+  const personNote = state.budgetHasPersonColumn
+    ? (state.personFilter === "all"
+        ? "Totals below add up every person's budget line for each category."
+        : `Showing budgets set specifically for ${state.personFilter}.`)
+    : "Add a Person column to your Budget tab to set separate budgets per person — right now every person shares one number per category.";
+
   el.innerHTML = `
     <p style="font-size:11px;color:var(--muted);margin-bottom:14px">
       Showing <span style="color:var(--text)">${who}</span> · <span style="color:var(--text)">${monthL}</span>. Budgets come from the Budget tab of your Google Sheet.
     </p>
     <div class="budget-grid">${cards}</div>
-    <p class="budget-note">To change a budget, edit the amount in the Budget tab of your Google Sheet — it'll show up here within a couple of minutes.</p>`;
+    <p class="budget-note">${personNote} To change a budget, edit the Budget tab in your Sheet — it'll show up here within a couple of minutes.</p>`;
 }
 
 // ── Events ──
